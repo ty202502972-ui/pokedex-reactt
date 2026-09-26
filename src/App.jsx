@@ -1,718 +1,241 @@
-import { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
-import './App.css';
-
-const typeChart = {
-  normal: { rock: 2, ghost: 0, steel: 2 },
-  fire: { fire: 0.5, water: 2, grass: 0.5, ice: 0.5, bug: 0.5, rock: 2, dragon: 2, steel: 0.5 },
-  water: { fire: 0.5, water: 0.5, grass: 2, ground: 2, rock: 0.5, dragon: 2 },
-  electric: { water: 0.5, electric: 0.5, grass: 2, ground: 2, flying: 0.5, dragon: 2 },
-  grass: { fire: 2, water: 0.5, grass: 0.5, poison: 2, ground: 0.5, flying: 2, bug: 2, rock: 0.5, dragon: 2, steel: 2 },
-  ice: { fire: 2, water: 2, grass: 0.5, ice: 0.5, ground: 0.5, flying: 0.5, dragon: 0.5, steel: 2 },
-  fighting: { normal: 0.5, ice: 0.5, poison: 2, flying: 2, psychic: 2, bug: 0.5, rock: 0.5, ghost: 0, dark: 0.5, steel: 0.5, fairy: 2 },
-  poison: { grass: 0.5, poison: 0.5, ground: 2, rock: 2, ghost: 0.5, steel: 0, fairy: 0.5 },
-  ground: { fire: 0.5, electric: 0, grass: 2, poison: 0.5, flying: 0, bug: 2, rock: 0.5, steel: 0.5 },
-  flying: { electric: 2, grass: 0.5, fighting: 0.5, bug: 0.5, rock: 2, steel: 2 },
-  psychic: { fighting: 0.5, poison: 0.5, psychic: 2, dark: 2, steel: 2 },
-  bug: { fire: 2, grass: 0.5, fighting: 0.5, poison: 2, flying: 2, psychic: 0.5, ghost: 2, dark: 0.5, fairy: 2 },
-  rock: { fire: 0.5, ice: 0.5, fighting: 2, ground: 2, flying: 0.5, bug: 0.5, steel: 2 },
-  ghost: { normal: 0, ghost: 2, psychic: 2, dark: 2 },
-  dragon: { dragon: 2, steel: 2, fairy: 2 },
-  dark: { fighting: 2, psychic: 0, ghost: 0.5, dark: 0.5, fairy: 2 },
-  steel: { fire: 2, water: 2, electric: 2, ice: 0.5, rock: 0.5, steel: 0.5, fairy: 0.5 },
-  fairy: { fire: 2, fighting: 0.5, poison: 2, dragon: 0, dark: 0.5, steel: 2 },
-};
-
-const collectEvolutionChain = (chain, result = []) => {
-  if (!chain) return result;
-
-  result.push({
-    name: chain.species.name,
-    url: chain.species.url,
-  });
-
-  chain.evolves_to.forEach((nextChain) => collectEvolutionChain(nextChain, result));
-
-  return result;
-};
-
-const getOverviewWeaknesses = (types = []) => {
-  const totalWeaknesses = {};
-
-  types.forEach((type) => {
-    const typeData = typeChart[type] || {};
-
-    Object.entries(typeData).forEach(([targetType, multiplier]) => {
-      const currentValue = totalWeaknesses[targetType] || 1;
-      totalWeaknesses[targetType] = currentValue * multiplier;
-    });
-  });
-
-  return Object.entries(totalWeaknesses)
-    .filter(([, multiplier]) => multiplier > 1)
-    .map(([type, multiplier]) => ({ type, multiplier }))
-    .sort((a, b) => b.multiplier - a.multiplier)
-    .slice(0, 8);
-};
-
-const getPokemonImageUrl = (pokemon, shiny = false) => {
-  if (!pokemon) return '';
-
-  if (shiny) {
-    return pokemon.sprites?.front_shiny || pokemon.sprites?.front_default || '';
-  }
-
-  return pokemon.sprites?.front_default || pokemon.sprites?.other?.['official-artwork']?.front_default || '';
-};
-
-const getEnglishDescription = (speciesData) => {
-  const descriptionEntry = speciesData?.flavor_text_entries?.find(
-    (entry) => entry.language?.name === 'en'
-  );
-
-  if (!descriptionEntry?.flavor_text) {
-    return 'No description available.';
-  }
-
-  return descriptionEntry.flavor_text.replace(/\f|\n/g, ' ').replace(/\s+/g, ' ').trim();
-};
-
-function App() {
-  const [pokemonList, setPokemonList] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [selectedPokemon, setSelectedPokemon] = useState(null);
-  const [expandedPokemonId, setExpandedPokemonId] = useState(null);
-  const [expandedDetails, setExpandedDetails] = useState({});
-  const [descriptionLoading, setDescriptionLoading] = useState(false);
-  const [favoriteIds, setFavoriteIds] = useState({});
-  const detailScrollRef = useRef(null);
-  const descriptionScrollRef = useRef(null);
-
-  useEffect(() => {
-    let isMounted = true;
-    let indexLoaded = false;
-
-    const fetchPokemon = async () => {
-      try {
-        setLoading(true);
-        setError('');
-
-        const response = await axios.get('https://pokeapi.co/api/v2/pokemon?limit=1025');
-        const results = response.data.results;
-        const pokemonIndex = results.map((pokemon, index) => ({
-          id: index + 1,
-          name: pokemon.name,
-          sprites: {
-            front_default: `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${index + 1}.png`,
-          },
-          types: [],
-          description: 'Loading description...',
-        }));
-
-        if (!isMounted) return;
-        setPokemonList(pokemonIndex);
-        setLoading(false);
-        indexLoaded = true;
-
-        for (let start = 0; start < results.length; start += 20) {
-          const batch = results.slice(start, start + 20);
-          const detailedData = await Promise.all(
-            batch.map(async (pokemon) => {
-              try {
-                const { data } = await axios.get(pokemon.url);
-
-                let description = 'No description available.';
-
-                try {
-                  const speciesResponse = await axios.get(data.species?.url);
-                  description = getEnglishDescription(speciesResponse.data);
-                } catch {
-                  description = 'No description available.';
-                }
-
-                return {
-                  ...data,
-                  description,
-                };
-              } catch {
-                return null;
-              }
-            })
-          );
-
-          if (!isMounted) return;
-          setPokemonList((currentList) => {
-            const detailsById = new Map(
-              detailedData.filter(Boolean).map((pokemon) => [pokemon.id, pokemon])
-            );
-            return currentList.map((pokemon) => detailsById.get(pokemon.id) || pokemon);
-          });
-        }
-      } catch (err) {
-        console.error('Error fetching Pokémon data:', err);
-        if (isMounted && !indexLoaded) {
-          setError('Unable to load Pokémon right now. Please try again later.');
-        }
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchPokemon();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  const handleSearch = (e) => {
-    e.preventDefault();
-    setSearchQuery(searchTerm.toLowerCase().trim());
-  };
-
-  const filteredPokemon = pokemonList.filter((pokemon) =>
-    pokemon.name.toLowerCase().includes(searchQuery)
-  );
-
-  useEffect(() => {
-    if (!selectedPokemon || !filteredPokemon.length) return undefined;
-
-    const handleKeyNavigation = (event) => {
-      if (event.key === 'Escape') {
-        setSelectedPokemon(null);
-        return;
-      }
-
-      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-        if (!detailScrollRef.current) return;
-
-        event.preventDefault();
-        const scrollAmount = Math.min(detailScrollRef.current.clientHeight * 0.7, 220);
-        detailScrollRef.current.scrollBy({
-          top: (event.key === 'ArrowDown' ? 1 : -1) * scrollAmount,
-          behavior: 'smooth',
-        });
-        return;
-      }
-
-      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) {
-        return;
-      }
-
-      event.preventDefault();
-      const currentIndex = filteredPokemon.findIndex((pokemon) => pokemon.id === selectedPokemon.id);
-      const direction = event.key === 'ArrowRight' ? 1 : -1;
-      const nextIndex = (currentIndex + direction + filteredPokemon.length) % filteredPokemon.length;
-      const nextPokemon = filteredPokemon[nextIndex];
-
-      if (nextPokemon) {
-        handlePokemonClick(nextPokemon);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyNavigation);
-    return () => window.removeEventListener('keydown', handleKeyNavigation);
-  }, [selectedPokemon, filteredPokemon]);
-
-  const loadExpandedPokemonInfo = async (pokemon) => {
-    if (!pokemon || expandedDetails[pokemon.id]) return;
-
-    try {
-      const speciesUrl = pokemon.species?.url;
-      const basicDetails = {
-        description: pokemon.description || 'No description available.',
-        abilities: pokemon.abilities || [],
-        height: pokemon.height ?? 0,
-        weight: pokemon.weight ?? 0,
-        base_experience: pokemon.base_experience ?? 0,
-        stats: pokemon.stats || [],
-        evolutionChain: [],
-        weaknesses: getOverviewWeaknesses(
-          pokemon.types?.map((typeInfo) => typeInfo.type.name) || []
-        ),
-      };
-
-      if (!speciesUrl) {
-        setExpandedDetails((current) => ({
-          ...current,
-          [pokemon.id]: basicDetails,
-        }));
-        return;
-      }
-
-      const [speciesResponse, evolutionResponse] = await Promise.all([
-        axios.get(speciesUrl),
-        axios.get(speciesUrl).then(async (response) => {
-          if (!response.data.evolution_chain?.url) {
-            return { data: { chain: null } };
-          }
-
-          return axios.get(response.data.evolution_chain.url);
-        }),
-      ]);
-
-      const description = getEnglishDescription(speciesResponse.data);
-      const evolutionChain = evolutionResponse?.data?.chain
-        ? collectEvolutionChain(evolutionResponse.data.chain)
-        : [];
-
-      setExpandedDetails((current) => ({
-        ...current,
-        [pokemon.id]: {
-          ...basicDetails,
-          description,
-          evolutionChain,
-        },
-      }));
-    } catch {
-      setExpandedDetails((current) => ({
-        ...current,
-        [pokemon.id]: {
-          description: 'Description unavailable right now.',
-          abilities: pokemon.abilities || [],
-          height: pokemon.height ?? 0,
-          weight: pokemon.weight ?? 0,
-          base_experience: pokemon.base_experience ?? 0,
-          stats: pokemon.stats || [],
-          evolutionChain: [],
-          weaknesses: getOverviewWeaknesses(
-            pokemon.types?.map((typeInfo) => typeInfo.type.name) || []
-          ),
-        },
-      }));
-    }
-  };
-
-  const handlePokemonClick = async (pokemon) => {
-    setExpandedPokemonId((currentExpandedId) =>
-      currentExpandedId === pokemon.id ? null : pokemon.id
-    );
-
-    if (!expandedDetails[pokemon.id]) {
-      await loadExpandedPokemonInfo(pokemon);
-    }
-  };
-
-  const toggleFavorite = (pokemonId) => {
-    setFavoriteIds((current) => ({
-      ...current,
-      [pokemonId]: !current[pokemonId],
-    }));
-  };
-
-  const handleCloseModal = () => {
-    setSelectedPokemon(null);
-  };
-
-  useEffect(() => {
-    if (detailScrollRef.current) {
-      detailScrollRef.current.scrollTo({ top: 0, behavior: 'auto' });
-    }
-    if (descriptionScrollRef.current) {
-      descriptionScrollRef.current.scrollTo({ top: 0, behavior: 'auto' });
-    }
-  }, [selectedPokemon?.id]);
-
-  const scrollDetails = (direction) => {
-    const panel = detailScrollRef.current || descriptionScrollRef.current;
-    if (!panel) return;
-
-    const step = Math.min(panel.clientHeight * 0.7, 220);
-    panel.scrollBy({ top: direction * step, behavior: 'smooth' });
-  };
-
-  return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="eyebrow">Pokédex</p>
-          <h1>Generations 1-9 Pokémon</h1>
-        </div>
-
-        <form
-          className="search-bar"
-          onSubmit={handleSearch}
-          role="search"
-          aria-label="Search the Pokédex"
-        >
-          <input
-            id="pokemon-search"
-            name="pokemon-search"
-            type="text"
-            value={searchTerm}
-            onChange={(e) => {
-              const value = e.target.value;
-              setSearchTerm(value);
-              setSearchQuery(value.toLowerCase().trim());
-            }}
-            placeholder="Search by name"
-            aria-label="Search for a Pokémon"
-            autoComplete="off"
-          />
-          <button type="submit" aria-label="Submit Pokémon search" title="Search Pokémon">
-            Search
-          </button>
-        </form>
-      </header>
-
-      {loading ? (
-        <div className="status">Loading Pokémon...</div>
-      ) : error ? (
-        <div className="status error">{error}</div>
-      ) : (
-        <>
-          <p className="result-count">{filteredPokemon.length} Pokémon found</p>
-
-          <div className="pokemon-grid">
-            {filteredPokemon.length > 0 ? (
-              filteredPokemon.map((pokemon) => (
-                <article
-                  key={pokemon.id}
-                  className={`pokemon-card ${expandedPokemonId === pokemon.id ? 'expanded' : ''}`}
-                  onClick={() => handlePokemonClick(pokemon)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      handlePokemonClick(pokemon);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Toggle details for ${pokemon.name}`}
-                  title={`Toggle details for ${pokemon.name}`}
-                >
-                  <div className="pokemon-image-wrap">
-                    <img
-                      src={pokemon.sprites?.front_default || ''}
-                      alt={pokemon.name}
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  </div>
-
-                  <p className="pokemon-id">#{String(pokemon.id).padStart(3, '0')}</p>
-                  <h2>{pokemon.name}</h2>
-
-                  <div className="pokemon-types">
-                    {pokemon.types?.map((typeInfo) => (
-                      <span key={typeInfo.type.name} className="type-badge">
-                        {typeInfo.type.name}
-                      </span>
-                    ))}
-                  </div>
-
-                  {expandedPokemonId === pokemon.id && (
-                    <div className="pokemon-card-details">
-                      <div id={`pokemon-card-content-${pokemon.id}`} className="pokemon-card-content">
-                        <div className="card-detail-header">
-                          <div className="card-sound">♪</div>
-                          <h3>{pokemon.name}</h3>
-                        </div>
-
-                        <div className="card-type-row">
-                          {pokemon.types?.map((typeInfo) => (
-                            <span key={typeInfo.type.name} className="type-badge">
-                              {typeInfo.type.name}
-                            </span>
-                          ))}
-                        </div>
-
-                        <div className="mini-section">
-                          <h4>EVOLUTION LINE</h4>
-                          <div className="mini-evolution-row">
-                            {(expandedDetails[pokemon.id]?.evolutionChain?.length
-                              ? expandedDetails[pokemon.id].evolutionChain
-                              : [{ name: pokemon.name, url: pokemon.species?.url || '' }]
-                            ).map((stage, index) => (
-                              <div key={`${stage.name}-${index}`} className="mini-evolution-stage">
-                                {stage.url ? (
-                                  <img
-                                    src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${Number(
-                                      stage.url.split('/').filter(Boolean).pop()
-                                    )}.png`}
-                                    alt={stage.name}
-                                  />
-                                ) : null}
-                                <span>{stage.name}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="mini-section">
-                          <h4>FIELD NOTE</h4>
-                          <p>
-                            {expandedDetails[pokemon.id]?.description ||
-                              pokemon.description ||
-                              'No description available.'}
-                          </p>
-                        </div>
-
-                        <div className="mini-stats-grid">
-                          <div className="mini-stat-box">
-                            <span className="mini-label">HEIGHT</span>
-                            <strong>{(pokemon.height / 10).toFixed(1)}m</strong>
-                          </div>
-                          <div className="mini-stat-box">
-                            <span className="mini-label">WEIGHT</span>
-                            <strong>{(pokemon.weight / 10).toFixed(1)}kg</strong>
-                          </div>
-                          <div className="mini-stat-box full-width">
-                            <span className="mini-label">BASE XP</span>
-                            <strong>{pokemon.base_experience ?? 0}</strong>
-                          </div>
-                        </div>
-
-                        <div className="mini-section">
-                          <h4>ABILITIES</h4>
-                          <div className="mini-tag-list">
-                            {(expandedDetails[pokemon.id]?.abilities || pokemon.abilities || []).map(
-                              (abilityInfo) => (
-                                <span key={abilityInfo.ability.name} className="mini-tag">
-                                  {abilityInfo.ability.name}
-                                  {abilityInfo.is_hidden ? ' · hidden' : ''}
-                                </span>
-                              )
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="mini-section">
-                          <h4>TYPE MATCH-UPS</h4>
-                          <div className="mini-tag-list warning-list">
-                            {(expandedDetails[pokemon.id]?.weaknesses ||
-                              getOverviewWeaknesses(
-                                pokemon.types?.map((typeInfo) => typeInfo.type.name) || []
-                              )
-                            ).map(({ type, multiplier }) => (
-                              <span key={type} className="mini-tag weak-tag">
-                                {type}×{multiplier}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="mini-section">
-                          <h4>BASE STATS</h4>
-                          <div className="mini-stat-list">
-                            {(expandedDetails[pokemon.id]?.stats || pokemon.stats || []).map((statInfo) => (
-                              <div key={statInfo.stat.name} className="mini-stat-row">
-                                <span>{statInfo.stat.name}</span>
-                                <strong>{statInfo.base_stat}</strong>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </article>
-              ))
-            ) : (
-              <div className="status no-results">
-                No Pokémon matched “{searchQuery || 'your search'}”.
-              </div>
-            )}
-          </div>
-        </>
-      )}
-
-      {selectedPokemon && (
-        <div
-          className="pokemon-modal-backdrop"
-          onClick={handleCloseModal}
-          role="presentation"
-          aria-hidden="true"
-        >
-          <section
-            className="pokemon-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="pokemon-modal-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              className="modal-close"
-              type="button"
-              onClick={handleCloseModal}
-              aria-label="Close Pokémon details"
-              title="Close Pokémon details"
-            >
-              ×
-            </button>
-
-            <div className="modal-topbar">
-              <button
-                type="button"
-                className={`favorite-toggle ${favoriteIds[selectedPokemon.id] ? 'active' : ''}`}
-                onClick={() => toggleFavorite(selectedPokemon.id)}
-                aria-label={favoriteIds[selectedPokemon.id] ? 'Remove favorite' : 'Add favorite'}
-              >
-                {favoriteIds[selectedPokemon.id] ? '★ Favorite' : '☆ Favorite'}
-              </button>
-
-              <button
-                type="button"
-                className="compare-button"
-                aria-label="Compare Pokémon"
-              >
-                COMPARE
-              </button>
-
-              <button
-                type="button"
-                className="shiny-toggle"
-                onClick={() =>
-                  setSelectedPokemon((current) =>
-                    current
-                      ? {
-                          ...current,
-                          isShiny: !current.isShiny,
-                        }
-                      : current
-                  )
-                }
-                aria-label="Toggle shiny sprite"
-              >
-                SHINY
-              </button>
-            </div>
-
-            <p className="modal-number">NO. {String(selectedPokemon.id).padStart(3, '0')}</p>
-
-            <img
-              src={getPokemonImageUrl(selectedPokemon, selectedPokemon.isShiny)}
-              alt={`${selectedPokemon.name} ${selectedPokemon.isShiny ? 'shiny' : ''} sprite`}
-              className="modal-pokemon-image"
-              loading="eager"
-              decoding="async"
-            />
-
-            <h2 id="pokemon-modal-title">{selectedPokemon.name}</h2>
-            <div className="sound-indicator">♪</div>
-            <div className="browse-hint">← → to browse · ↑ ↓ to scroll · Esc to close</div>
-
-            <div className="pokemon-types">
-              {selectedPokemon.types?.map((typeInfo) => (
-                <span key={typeInfo.type.name} className="type-badge">
-                  {typeInfo.type.name}
-                </span>
-              ))}
-            </div>
-
-            <div className="detail-scroll-controls" aria-label="Scroll Pokémon details">
-              <button type="button" className="scroll-button" onClick={() => scrollDetails(-1)} aria-label="Scroll details up">
-                ↑
-              </button>
-              <button type="button" className="scroll-button" onClick={() => scrollDetails(1)} aria-label="Scroll details down">
-                ↓
-              </button>
-            </div>
-
-            <div ref={detailScrollRef} className="detail-scroll-area">
-              <div className="pokemon-detail-panel">
-                <div className="detail-section evolution-section">
-                  <h3>EVOLUTION LINE</h3>
-                  <div className="evolution-row">
-                    {selectedPokemon.evolutionChain?.length ? (
-                      selectedPokemon.evolutionChain.map((stage, index) => (
-                        <div key={`${stage.name}-${index}`} className="evolution-stage">
-                          <img
-                            src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${Number(
-                              stage.url.split('/').filter(Boolean).pop()
-                            )}.png`}
-                            alt={stage.name}
-                          />
-                          <span>{stage.name}</span>
-                        </div>
-                      ))
-                    ) : (
-                      <span className="neutral-copy">Evolution data unavailable</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="detail-section field-note">
-                  <h3>FIELD NOTE</h3>
-                  <div ref={descriptionScrollRef} className="description-scroll-area">
-                    <p>
-                      {descriptionLoading ? 'Loading description...' : selectedPokemon.description}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="detail-grid compact-grid">
-                  <div className="detail-item">
-                    <span className="detail-label">Height</span>
-                    <strong>{(selectedPokemon.height / 10).toFixed(1)} m</strong>
-                  </div>
-                  <div className="detail-item">
-                    <span className="detail-label">Weight</span>
-                    <strong>{(selectedPokemon.weight / 10).toFixed(1)} kg</strong>
-                  </div>
-                  <div className="detail-item full-width">
-                    <span className="detail-label">Base XP</span>
-                    <strong>{selectedPokemon.base_experience ?? 0}</strong>
-                  </div>
-                </div>
-
-                <div className="detail-section">
-                  <h3>ABILITIES</h3>
-                  <ul className="detail-list">
-                    {selectedPokemon.abilities?.map((abilityInfo) => (
-                      <li key={abilityInfo.ability.name}>
-                        {abilityInfo.ability.name}
-                        {abilityInfo.is_hidden ? ' · hidden' : ''}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="detail-section">
-                  <h3>TYPE MATCH-UPS</h3>
-                  <div className="weakness-list">
-                    {selectedPokemon.weaknesses?.length ? (
-                      selectedPokemon.weaknesses.map(({ type, multiplier }) => (
-                        <span key={type} className="weakness-pill">
-                          {type}×{multiplier}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="neutral-copy">No weakness data</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="detail-section">
-                  <h3>BASE STATS</h3>
-                  <div className="stat-list">
-                    {selectedPokemon.stats?.map((statInfo) => {
-                      const percent = Math.min((statInfo.base_stat / 255) * 100, 100);
-
-                      return (
-                        <div key={statInfo.stat.name} className="stat-row">
-                          <div className="stat-header">
-                            <span>{statInfo.stat.name}</span>
-                            <strong>{statInfo.base_stat}</strong>
-                          </div>
-                          <div className="stat-bar" aria-hidden="true">
-                            <span style={{ width: `${percent}%` }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-        </div>
-      )}
-    </div>
-  );
+import { useEffect, useState } from 'react'
+import './App.css'
+
+const PAGE_SIZE = 12
+const TYPES = ['all', 'grass', 'fire', 'water', 'electric', 'bug', 'psychic', 'rock']
+
+async function getPokemon(url, signal) {
+  const response = await fetch(url, { signal })
+  if (!response.ok) throw new Error('Could not reach the PokéAPI. Please try again.')
+  return response.json()
 }
 
-export default App;
+function getPokemonArtwork(pokemon) {
+  return pokemon.sprites.other?.['official-artwork']?.front_default
+    || pokemon.sprites.other?.home?.front_default
+    || pokemon.sprites.front_default
+}
+
+function PokemonCard({ pokemon, onSelect, index }) {
+  const artwork = getPokemonArtwork(pokemon)
+
+  return (
+    <button
+      className={`pokemon-card ${pokemon.types[0].type.name} ${pokemon.id === 697 ? 'tyrantrum' : ''}`}
+      style={{ '--card-index': index }}
+      type="button"
+      onClick={() => onSelect(pokemon)}
+      aria-label={`View ${pokemon.name}, number ${pokemon.id}`}
+    >
+      <span className="card-number">{pokemon.id === 697 ? 'NO. 697 · T-REX FOSSIL' : `NO. ${String(pokemon.id).padStart(3, '0')}`}</span>
+      <span className="card-image-wrap">
+        {artwork && <img className="card-image" src={artwork} alt={pokemon.name} loading="lazy" />}
+      </span>
+      <span className="card-name-row">
+        <span className="pokemon-name">{pokemon.name.replaceAll('-', ' ')}</span>
+        <span className="hp-value">{pokemon.stats.find((stat) => stat.stat.name === 'hp')?.base_stat} HP</span>
+      </span>
+      <span className="card-types">
+        {pokemon.types.map(({ type }) => (
+          <span className={`type-pill ${type.name}`} key={type.name}>{type.name}</span>
+        ))}
+      </span>
+      <span className="card-rule" />
+      <span className="card-meta">
+        <span><b>{pokemon.height / 10} m</b><small>HEIGHT</small></span>
+        <span><b>{pokemon.weight / 10} kg</b><small>WEIGHT</small></span>
+        <span><b>{pokemon.stats.find((stat) => stat.stat.name === 'attack')?.base_stat}</b><small>ATTACK</small></span>
+      </span>
+    </button>
+  )
+}
+
+function PokemonDetails({ pokemon, onClose }) {
+  const [species, setSpecies] = useState(null)
+  const artwork = getPokemonArtwork(pokemon)
+  const flavorText = species?.flavor_text_entries.find((entry) => entry.language.name === 'en')?.flavor_text.replace(/[\n\f]/g, ' ')
+  const genus = species?.genera.find((entry) => entry.language.name === 'en')?.genus
+
+  useEffect(() => {
+    const controller = new AbortController()
+    getPokemon(pokemon.species.url, controller.signal)
+      .then(setSpecies)
+      .catch((error) => {
+        if (error.name !== 'AbortError') setSpecies(null)
+      })
+    return () => controller.abort()
+  }, [pokemon.id, pokemon.species?.url])
+
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className={`pokemon-dialog ${pokemon.types[0].type.name} ${pokemon.id === 25 ? 'pikachu' : ''}`} role="dialog" aria-modal="true" aria-labelledby="detail-name">
+        <button className="dialog-close" type="button" onClick={onClose} aria-label="Close details">×</button>
+        <div className="detail-topline">
+          <p className="dialog-kicker">POKÉDEX ENTRY <span>NO. {String(pokemon.id).padStart(3, '0')}</span></p>
+          {genus && <span className="dialog-genus">{genus}</span>}
+        </div>
+        <div className="dialog-hero">
+          <div className="dialog-artwork">
+            {artwork && <img src={artwork} alt={pokemon.name} />}
+            <span className="artwork-orbit" />
+          </div>
+          <div className="dialog-heading">
+            <h2 id="detail-name">{pokemon.name.replaceAll('-', ' ')}</h2>
+            <div className="card-types">
+              {pokemon.types.map(({ type }) => <span className={`type-pill ${type.name}`} key={type.name}>{type.name}</span>)}
+            </div>
+            <p className="dialog-ability">ABILITY <b>{pokemon.abilities[0]?.ability.name.replaceAll('-', ' ')}</b></p>
+          </div>
+        </div>
+        {flavorText && <p className="dialog-description">“{flavorText}”</p>}
+        <div className="detail-measurements">
+          <span><small>HEIGHT</small><b>{pokemon.height / 10} m</b></span>
+          <span><small>WEIGHT</small><b>{pokemon.weight / 10} kg</b></span>
+          <span><small>BASE EXP.</small><b>{pokemon.base_experience ?? '—'}</b></span>
+        </div>
+        <h3>Base stats <span>OUT OF 255</span></h3>
+        <div className="stat-list">
+          {pokemon.stats.map(({ base_stat, stat }, index) => (
+            <div className="stat-row" key={stat.name}>
+              <span>{stat.name.replaceAll('-', ' ')}</span><b>{base_stat}</b>
+              <span className="stat-track"><span style={{ '--stat-index': index, width: `${Math.min(base_stat / 255 * 100, 100)}%` }} /></span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function App() {
+  const [pokemon, setPokemon] = useState([])
+  const [selectedPokemon, setSelectedPokemon] = useState(null)
+  const [selectedType, setSelectedType] = useState('all')
+  const [page, setPage] = useState(0)
+  const [search, setSearch] = useState('')
+  const [searchResult, setSearchResult] = useState(null)
+  const [searchError, setSearchError] = useState('')
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const loadPage = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const endpoint = selectedType === 'all'
+          ? `https://pokeapi.co/api/v2/pokemon?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`
+          : `https://pokeapi.co/api/v2/type/${selectedType}`
+        const listing = await getPokemon(endpoint, controller.signal)
+        const results = selectedType === 'all' ? listing.results : listing.pokemon.map(({ pokemon: item }) => item)
+        const visibleResults = selectedType === 'all'
+          ? results
+          : results.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+        setTotal(selectedType === 'all' ? listing.count : results.length)
+        const entriesRequest = Promise.all(visibleResults.map(({ url }) => getPokemon(url, controller.signal)))
+        const tyrantrumRequest = selectedType === 'all' && page === 0
+          ? getPokemon('https://pokeapi.co/api/v2/pokemon/tyrantrum', controller.signal).catch((requestError) => {
+              if (requestError.name === 'AbortError') throw requestError
+              return null
+            })
+          : Promise.resolve(null)
+        const [entries, tyrantrum] = await Promise.all([entriesRequest, tyrantrumRequest])
+        const featuredEntries = selectedType === 'all' && page === 0
+          ? (tyrantrum ? [tyrantrum] : [])
+          : []
+        setPokemon([...entries, ...featuredEntries])
+      } catch (loadError) {
+        if (loadError.name !== 'AbortError') setError(loadError.message)
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+    loadPage()
+    return () => controller.abort()
+  }, [page, selectedType])
+
+  const chooseType = (type) => {
+    setSelectedType(type)
+    setPage(0)
+    setSearchResult(null)
+    setSearchError('')
+  }
+
+  const searchPokemon = async (event) => {
+    event.preventDefault()
+    if (!search.trim()) return
+    const pokemonName = search.trim().toLowerCase().replace(/\s+/g, '-')
+    if (/^\d+$/.test(pokemonName)) {
+      setSearchResult(null)
+      setSearchError('Search using a Pokémon name.')
+      return
+    }
+    setSearchError('')
+    setSearchResult(null)
+    setLoading(true)
+    try {
+      const result = await getPokemon(`https://pokeapi.co/api/v2/pokemon/${encodeURIComponent(pokemonName)}`)
+      setSearchResult(result)
+    } catch {
+      setSearchError(`No Pokémon found for “${search.trim()}”. Try a Pokémon name.`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const pageCount = Math.ceil(total / PAGE_SIZE)
+  const shownPokemon = searchResult ? [searchResult] : pokemon
+
+  return (
+    <main className="pokedex">
+      <header className="site-header">
+        <h1>POKÉDEX</h1>
+      </header>
+
+      <section className="catalogue" id="top">
+        <form className="search-form" onSubmit={searchPokemon} role="search">
+          <span className="search-icon" aria-hidden="true">⌕</span>
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Pokémon by name..." aria-label="Search Pokémon by name" />
+          {searchResult && <button className="clear-search" type="button" onClick={() => { setSearchResult(null); setSearch(''); setSearchError('') }}>CLEAR</button>}
+          <button className="search-submit" type="submit" aria-label="Search">↗</button>
+        </form>
+
+        <div className="collection-label"><span className="collection-dot" /> {searchResult ? '1 RESULT' : `${String(total).padStart(3, '0')} POKÉMON`}</div>
+
+        <div className="filter-row" aria-label="Filter by type">
+          <span className="filter-label">SORT BY TYPE</span>
+          {TYPES.map((type) => (
+            <button className={`filter-button ${selectedType === type ? 'active' : ''}`} key={type} type="button" aria-pressed={selectedType === type} onClick={() => chooseType(type)}>
+              {type !== 'all' && <span className={`filter-dot ${type}`} />}{type}
+            </button>
+          ))}
+        </div>
+
+        {error && <div className="status-message" role="alert">{error} <button type="button" onClick={() => setPage((current) => current)}>Try again</button></div>}
+        {searchError && <div className="status-message" role="status">{searchError}</div>}
+        {loading ? (
+          <div className="loading-state" aria-live="polite"><span className="loading-mark" /> Loading Pokémon cards...</div>
+        ) : (
+          <>
+            <div className="grid" aria-live="polite">
+              {shownPokemon.map((entry, index) => <PokemonCard key={entry.id} pokemon={entry} index={index} onSelect={setSelectedPokemon} />)}
+            </div>
+            {!searchResult && pageCount > 1 && (
+              <nav className="pagination" aria-label="Pokémon pages">
+                <button type="button" onClick={() => setPage((current) => current - 1)} disabled={page === 0}>← <span>PREVIOUS</span></button>
+                <span>PAGE <b>{String(page + 1).padStart(2, '0')}</b> <i>/</i> {String(pageCount).padStart(2, '0')}</span>
+                <button type="button" onClick={() => setPage((current) => current + 1)} disabled={page + 1 >= pageCount}><span>NEXT</span> →</button>
+              </nav>
+            )}
+          </>
+        )}
+      </section>
+      <footer className="site-footer"><span>POKÉMON CARDS <b>·</b> DATA BY POKÉAPI</span><span>SEARCH BY NAME</span></footer>
+      {selectedPokemon && <PokemonDetails pokemon={selectedPokemon} onClose={() => setSelectedPokemon(null)} />}
+    </main>
+  )
+}
+
+export default App
